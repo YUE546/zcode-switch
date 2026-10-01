@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./bridge.js";
 import { ic } from "./icons.js";
 import { t, has, errCode, stripErr } from "./i18n.js";
 
@@ -119,6 +119,17 @@ export function openConfirmModal(m) {
   (m.focusNo || kind === "danger" ? no : yes).focus();
 }
 
+// web 模式导出：服务端返回加密内容（相对路径语义），浏览器侧 <a download> 保存
+function downloadText(filename, text) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
 export function openPwModal(m) {
   document.querySelector(".pw-mask")?.remove();
   const isExport = m.mode === "export" || m.mode === "exportAll";
@@ -169,11 +180,17 @@ export function openPwModal(m) {
     try {
       if (m.mode === "export") {
         const r = await invoke("export_finalize", { path: m.path, id: m.id, password: pw1 });
-        toast(t("pw.exportedToast", { path: r.path }), "ok", t("pw.exportedToastDetail"));
+        if (r.download) {
+          downloadText(r.filename, r.content);
+          toast(t("pw.exportedToast", { path: r.filename }), "ok", t("pw.exportedToastDetail"));
+        } else {
+          toast(t("pw.exportedToast", { path: r.path }), "ok", t("pw.exportedToastDetail"));
+        }
         m.onDone?.(r);
       } else if (m.mode === "exportAll") {
         const r = await invoke("export_all_finalize", { path: m.path, password: pw1 });
-        toast(t("pw.exportedAllToast", { count: r.count }), "ok", r.path);
+        if (r.download) downloadText(r.filename, r.content);
+        toast(t("pw.exportedAllToast", { count: r.count }), "ok", r.download ? r.filename : r.path);
         m.onDone?.(r);
       } else {
         let report = await invoke("import_sealed", { files: m.files, password: pw1 });

@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen, openCaptchaWindow, loadCaptchaWindow, isTauri } from "./bridge.js";
 import { esc, toast, openPwModal, openConfirmModal, openProviderModal, installDelegation, dismissSplash } from "./ui.js";
 import { ic } from "./icons.js";
 import { init, t, has, lang, localeTag, stripErr } from "./i18n.js";
@@ -301,7 +300,8 @@ const actions = {
       providers,
       onPick: async (id) => {
         try {
-          await invoke("oauth_begin", { provider: id });
+          const r = await invoke("oauth_begin", { provider: id });
+          if (r?.url) window.open(r.url, "_blank");
           toast(t("m.loginWindowOpened"), "ok", t("m.loginWindowDetail"));
         } catch (e) {
           toast(stripErr(e), "err");
@@ -316,12 +316,20 @@ const actions = {
     const plan = plans[0];
     if (!plan) { toast(t("m.noClaimable"), "warn"); return; }
     claimActive = true;
+    const capWin = openCaptchaWindow(); // 手势内同步占位，桌面模式返回 null
     try {
       await invoke("claim_start", { id, planId: plan.plan_id });
+      if (!isTauri && (!capWin || capWin.closed)) {
+        await invoke("claim_cancel").catch(() => {});
+        toast(t("m.captchaPopupBlocked"), "err");
+        return;
+      }
+      loadCaptchaWindow(capWin);
       toast(t("m.claimVerify", { name: plan.name || plan.plan_id }), "ok", t("m.claimVerifyDetail"));
       const r = await waitForClaimResult(id);
       if (!r) toast(t("m.claimTimeout"), "warn");
     } catch (e) {
+      if (capWin && !capWin.closed) capWin.close();
       toast(stripErr(e), "err");
     } finally {
       claimActive = false;
@@ -336,15 +344,23 @@ const actions = {
     if (claimActive || claimAllRunning || refreshClaim.running) return;
     claimAllRunning = true;
     claimActive = true;
+    let capWin = openCaptchaWindow(); // 手势内同步占位
     try {
       for (let i = 0; i < ids.length; i++) {
         const id = ids[i];
         const plan = claimable[id].plans[0];
         const name = state.accounts.find((a) => a.id === id)?.name || id;
         try {
+          if (capWin && capWin.closed) capWin = openCaptchaWindow();
           await invoke("claim_start", { id, planId: plan.plan_id });
+          loadCaptchaWindow(capWin);
         } catch (e) {
           toast(t("m.claimAccountErr", { name, err: stripErr(e) }), "err");
+          continue;
+        }
+        if (!isTauri && (!capWin || capWin.closed)) {
+          await invoke("claim_cancel").catch(() => {});
+          toast(t("m.captchaPopupBlocked"), "err");
           continue;
         }
         const r = await waitForClaimResult(id, 120000);
@@ -491,21 +507,29 @@ async function autoClaimTick() {
         continue;
       }
       if (!uiLocked()) render();
-      let attempts = 0;
-      let progressed = true;
-      while (progressed && attempts < AUTO_CLAIM_PER_ACCOUNT_CAP) {
-        if (autoAbortRequested) break;
-        attempts++;
-        progressed = false;
-        const plan = claimable[id]?.plans?.[0];
-        if (!plan) break;
-        try {
-          await invoke("claim_start", { id, planId: plan.plan_id, auto: true });
-        } catch (e) {
-          await invoke("claim_cancel").catch(() => {});
-          autoClaimCooldown[id] = Date.now() + AUTO_CLAIM_INTERVAL_MS;
-          break;
-        }
+        let attempts = 0;
+        let progressed = true;
+        while (progressed && attempts < AUTO_CLAIM_PER_ACCOUNT_CAP) {
+          if (autoAbortRequested) break;
+          attempts++;
+          progressed = false;
+          const plan = claimable[id]?.plans?.[0];
+          if (!plan) break;
+          const capWin = openCaptchaWindow(); // 自动轮无点击手势，可能被拦截
+          if (!isTauri && !capWin) {
+            await invoke("claim_cancel").catch(() => {});
+            autoClaimCooldown[id] = Date.now() + 60 * 60 * 1000;
+            toast(t("m.autoClaimInteractive", { name: accountName(id) }), "warn", t("m.autoClaimInteractiveDetail"));
+            break;
+          }
+          try {
+            await invoke("claim_start", { id, planId: plan.plan_id, auto: true });
+            loadCaptchaWindow(capWin);
+          } catch (e) {
+            await invoke("claim_cancel").catch(() => {});
+            autoClaimCooldown[id] = Date.now() + AUTO_CLAIM_INTERVAL_MS;
+            break;
+          }
         const r = await waitForClaimResult(id, AUTO_CLAIM_WAIT_MS);
         if (!r) {
           await invoke("claim_cancel").catch(() => {});

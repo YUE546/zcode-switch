@@ -9,6 +9,11 @@ edition = "2021"
 name = "zcode_switch_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# 不经 `tauri build`（如 CI 里直接 cargo build）时必须开启，否则内嵌资源不生效、
+# 桌面模式会去连 devUrl（127.0.0.1:5173）
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

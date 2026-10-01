@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen, isTauri } from "./bridge.js";
 import { esc, toast, openPwModal, installDelegation, dismissSplash } from "./ui.js";
 import { ic } from "./icons.js";
 import { init, t, lang, stripErr } from "./i18n.js";
@@ -26,6 +25,51 @@ async function guard(fn) {
   } finally {
     busy = false;
   }
+}
+
+// web 模式导入：<input type=file> 读本地 .zsb 并做与服务端对话框同构的预检，
+// 通过后仍走 import_sealed（与桌面共用解密 + 入库）
+async function importFilesWeb() {
+  const files = await pickLocalFiles();
+  if (!files || !files.length) return;
+  const sealed = [];
+  const preErrors = [];
+  for (const f of files) {
+    try {
+      const v = JSON.parse(await f.text());
+      // 信封结构对应 cipher.rs：kdf + cipher；format 对应 FORMAT_BUNDLE
+      if (!v || typeof v !== "object" || !v.kdf || !v.cipher) {
+        preErrors.push(t("s.importNotSealed", { fname: f.name }));
+      } else if (v.format !== "zsw-accounts-bundle") {
+        preErrors.push(t("s.importNotBundle", { fname: f.name }));
+      } else {
+        sealed.push([f.name, v]);
+      }
+    } catch {
+      preErrors.push(t("s.importJsonErr", { fname: f.name }));
+    }
+  }
+  if (sealed.length) {
+    openPwModal({ mode: "import", files: sealed, preErrors, onDone: (rep) => actions.finishImport(rep) });
+    return;
+  }
+  actions.finishImport({ added: [], skipped: [], errors: preErrors });
+}
+
+function pickLocalFiles() {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".zsb,.json";
+    input.multiple = true;
+    let done = false;
+    input.onchange = () => { done = true; resolve([...input.files]); };
+    // 取消选择不触发 change：窗口焦点恢复后仍无结果视为取消
+    window.addEventListener("focus", () => {
+      setTimeout(() => { if (!done) resolve([]); }, 300);
+    }, { once: true });
+    input.click();
+  });
 }
 
 const actions = {
@@ -74,6 +118,7 @@ const actions = {
 
   async importFiles() {
     await guard(async () => {
+      if (!isTauri) { await importFilesWeb(); return; }
       const p = await invoke("import_pick_files");
       if (!p.picked) return;
       const sealed = p.sealed || [];
@@ -174,7 +219,7 @@ function render() {
     <section class="settings open">
       ${langSeg(s.language || "zh")}
       <label>BEHAVIOR · ${t("s.behaviorLabel")}</label>
-      ${toggle(autostart, "actions.toggleAutostart()", t("s.autostart"), t("s.autostartDesc"))}
+      ${isTauri ? toggle(autostart, "actions.toggleAutostart()", t("s.autostart"), t("s.autostartDesc")) : ""}
       ${toggle(s.launch_after_switch, "actions.toggleBehavior('launch')", t("s.launchAfter"), t("s.launchAfterDesc"))}
       ${toggle(s.close_to_tray, "actions.toggleBehavior('tray')", t("s.closeTray"), t("s.closeTrayDesc"))}
       ${toggle(s.hot_switch, "actions.toggleBehavior('hot')", t("s.hotSwitch"), t("s.hotSwitchDesc"))}
@@ -193,7 +238,7 @@ function render() {
       <label style="margin-top:14px">${t("s.pathLabel")}</label>
       <div class="path-line">
         <input class="zcode-path" type="text" value="${esc(s.zcode_path)}" placeholder="C:\\Program Files\\ZCode\\ZCode.exe" keydown="onPathKey(event)">
-        <button class="btn-ghost" click="actions.browsePath()">${t("s.browse")}</button>
+        ${isTauri ? `<button class="btn-ghost" click="actions.browsePath()">${t("s.browse")}</button>` : ""}
         <button class="btn-ghost" click="actions.savePath()">${t("common.save")}</button>
       </div>
       <div class="hint">${t("s.hint")}</div>

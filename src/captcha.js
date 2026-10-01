@@ -1,6 +1,5 @@
 
-import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { invoke, emit, isTauri } from "./bridge.js";
 import { init, t, lang, stripErr } from "./i18n.js";
 
 const SDK_URL = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
@@ -84,10 +83,15 @@ async function run() {
     submitted = true;
     clearTimeout(tracelessTimer);
     status(t("c.passed"));
-    invoke("claim_captcha_submit", { param, region }).catch((e) => {
-      status(t("c.claimReqFail"), "err");
-      detail(stripErr(e));
-    });
+    invoke("claim_captcha_submit", { param, region })
+      .then(() => {
+        // 桌面模式由后端关窗；web 模式弹窗自关（结果已 SSE 广播给主界面）
+        if (!isTauri) setTimeout(() => window.close(), 700);
+      })
+      .catch((e) => {
+        status(t("c.claimReqFail"), "err");
+        detail(stripErr(e));
+      });
   };
 
   const interactive = (why) => {

@@ -1,6 +1,7 @@
 pub mod cipher;
 pub mod cli;
 pub mod i18n;
+pub mod server;
 mod claim;
 mod flowlog;
 mod oauth;
@@ -22,33 +23,71 @@ const TRAY_ID: &str = "main";
 
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
-struct PendingClaim {
-    account_id: String,
-    account_name: String,
-    plan_id: String,
-    plan_name: String,
-    credentials: Value,
-    config: Option<Value>,
-    device_mid: String,
+/// 是否为 --server 服务模式（无窗口 + 托盘常驻 + HTTP 服务）
+static SERVER_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub(crate) struct PendingClaim {
+    pub(crate) account_id: String,
+    pub(crate) account_name: String,
+    pub(crate) plan_id: String,
+    pub(crate) plan_name: String,
+    pub(crate) credentials: Value,
+    pub(crate) config: Option<Value>,
+    pub(crate) device_mid: String,
 }
 
 static PENDING_CLAIM: Mutex<Option<PendingClaim>> = Mutex::new(None);
 
-fn pending_guard() -> std::sync::MutexGuard<'static, Option<PendingClaim>> {
+pub(crate) fn pending_guard() -> std::sync::MutexGuard<'static, Option<PendingClaim>> {
     match PENDING_CLAIM.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     }
 }
 
-fn store_guard() -> std::sync::MutexGuard<'static, ()> {
+/// claim 提交结果 → `claim://result` payload（桌面 emit 与 web SSE 广播共用）
+pub(crate) fn claim_result_payload(
+    pending: &PendingClaim,
+    res: Result<Value, claim::ClaimError>,
+) -> Value {
+    match res {
+        Ok(v) => {
+            let ms = |k: &str| -> Option<i64> {
+                v.pointer(&format!("/data/plan/{k}"))
+                    .and_then(|x| x.as_i64())
+                    .map(|s| s * 1000)
+            };
+            let server_time = v
+                .pointer("/data/server_time")
+                .and_then(|x| x.as_i64())
+                .map(|s| s * 1000);
+            let outcome = claim::ClaimOutcome {
+                account_id: pending.account_id.clone(),
+                account_name: pending.account_name.clone(),
+                plan_name: pending.plan_name.clone(),
+                starts_at: ms("starts_at"),
+                ends_at: ms("ends_at"),
+                server_time,
+            };
+            serde_json::to_value(&outcome).unwrap_or(Value::Null)
+        }
+        Err(e) => claim::failure_payload(
+            &pending.account_id,
+            &pending.account_name,
+            &pending.plan_name,
+            &e,
+        ),
+    }
+}
+
+pub(crate) fn store_guard() -> std::sync::MutexGuard<'static, ()> {
     match STORE_LOCK.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     }
 }
 
-fn sanitize_filename(name: &str) -> String {
+pub(crate) fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| match c {
             '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
@@ -111,6 +150,13 @@ pub fn rebuild_tray(app: &AppHandle) {
 }
 
 fn show_main(app: &AppHandle) {
+    // 服务模式没有窗口：托盘"打开界面"= 用浏览器打开 Web UI
+    if SERVER_MODE.get().copied().unwrap_or(false) {
+        if let Some(url) = server::web_url() {
+            let _ = store::open_url(url);
+        }
+        return;
+    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -296,44 +342,12 @@ async fn claim_captcha_submit(
         &pending.plan_id,
         &param,
         region.as_deref(),
-        Some(pending.device_mid),
+        Some(pending.device_mid.clone()),
     );
     close_captcha_window(&app);
-    let payload = match res {
-        Ok(v) => {
-            let ms = |k: &str| -> Option<i64> {
-                v.pointer(&format!("/data/plan/{k}"))
-                    .and_then(|x| x.as_i64())
-                    .map(|s| s * 1000)
-            };
-            let server_time = v
-                .pointer("/data/server_time")
-                .and_then(|x| x.as_i64())
-                .map(|s| s * 1000);
-            let outcome = claim::ClaimOutcome {
-                account_id: pending.account_id.clone(),
-                account_name: pending.account_name.clone(),
-                plan_name: pending.plan_name.clone(),
-                starts_at: ms("starts_at"),
-                ends_at: ms("ends_at"),
-                server_time,
-            };
-            let p = serde_json::to_value(&outcome).unwrap_or(Value::Null);
-            let _ = app.emit("claim://result", &p);
-            p
-        }
-        Err(e) => {
-            let p = claim::failure_payload(
-                &pending.account_id,
-                &pending.account_name,
-                &pending.plan_name,
-                &e,
-            );
-            let _ = app.emit("claim://result", &p);
-            return Ok(p);
-        }
-    };
-    Ok(payload)
+    let p = claim_result_payload(&pending, res);
+    let _ = app.emit("claim://result", &p);
+    Ok(p)
 }
 
 #[tauri::command]
@@ -349,10 +363,10 @@ fn close_captcha_window(app: &AppHandle) {
     }
 }
 
-struct PendingOAuth {
-    provider: String,
-    state: String,
-    flow: String,
+pub(crate) struct PendingOAuth {
+    pub(crate) provider: String,
+    pub(crate) state: String,
+    pub(crate) flow: String,
 }
 
 #[derive(Clone)]
@@ -363,9 +377,9 @@ struct PollCfg {
     interval_ms: u64,
 }
 
-static PENDING_OAUTH: Mutex<Option<PendingOAuth>> = Mutex::new(None);
+pub(crate) static PENDING_OAUTH: Mutex<Option<PendingOAuth>> = Mutex::new(None);
 
-fn pending_oauth_guard() -> std::sync::MutexGuard<'static, Option<PendingOAuth>> {
+pub(crate) fn pending_oauth_guard() -> std::sync::MutexGuard<'static, Option<PendingOAuth>> {
     match PENDING_OAUTH.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
@@ -610,7 +624,7 @@ fn deeplink_err_soft(e: &str) -> bool {
     e != "__superseded__" && e != "__attribution__"
 }
 
-fn persist_oauth_account(
+pub(crate) fn persist_oauth_account(
     paths: &Paths,
     provider: &str,
     raw: &serde_json::Value,
@@ -1124,7 +1138,13 @@ async fn open_external(url: String) -> Result<(), String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run(server_mode: bool) {
+    let _ = SERVER_MODE.set(server_mode);
+    let mut context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    if server_mode {
+        // 不创建任何 WebView 窗口 → 不需要 WebView2 运行时；托盘与 HTTP 服务照常
+        context.config_mut().app.windows.clear();
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app);
@@ -1190,6 +1210,10 @@ pub fn run() {
             if let Ok(data_dir) = app.path().app_local_data_dir() {
                 flowlog::init(&data_dir);
             }
+            if SERVER_MODE.get().copied().unwrap_or(false) {
+                // 先起 HTTP 服务再建托盘，托盘"打开界面"才有 URL 可开
+                server::spawn();
+            }
             let _tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().expect("no window icon").clone())
                 .tooltip("Z·SWITCH")
@@ -1212,6 +1236,6 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

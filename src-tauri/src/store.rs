@@ -405,8 +405,10 @@ pub fn launch_zcode(path: &str) -> Result<(), String> {
 }
 
 pub fn open_url(url: &str) -> Result<(), String> {
-    if !url.starts_with("https://") {
-        return Err("仅支持 https 链接".into());
+    // https 优先；本机回环 http 放行（web UI 服务模式）
+    let loopback = url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost");
+    if !url.starts_with("https://") && !loopback {
+        return Err("仅支持 https 或本机回环链接".into());
     }
     if in_sandbox() {
         return Ok(());

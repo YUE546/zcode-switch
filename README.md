@@ -25,6 +25,12 @@ Tauri 2 桌面工具：在多个 ZCode 账号之间一键切换，自动显示�
 - **加密导出**：PBKDF2-HMAC-SHA256（100k 迭代）+ AES-256-GCM，随机 salt/nonce；错密码即失败，无明文痕迹
 - **凭据只在本地解密**：凭据解密仅用于显示用户名/邮箱；导出文件凭口令加密
 
+## 启动方式
+
+- **双击 `zcode-switch.exe`（release 默认）**：Web UI 服务模式 — 无窗口、托盘常驻、自动用浏览器打开界面（地址同时记录在 `%USERPROFILE%\.zcode-switch\web-ui-url.txt`），不依赖 WebView2 运行时
+- `zcode-switch.exe --desktop`：传统桌面窗口模式（WebView2）
+- `zcode-switch.exe --server`：同默认（保留的兼容参数）；开发构建（`npm run tauri dev`）默认仍是桌面窗口
+
 ## CLI
 
 ```
